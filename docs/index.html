@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="kk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Parking Simulator</title>
+<style>
+  :root { --bg:#11141c; --card:#1b1f2a; --road:#303440; --text:#e6e9f0; --muted:#8c94a5;
+          --green:#2eaa64; --red:#d64c56; --amber:#e2a834; --blue:#4682f0; --cyan:#28cdc8; --violet:#7054c8; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.4 system-ui, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width:1100px; margin:auto; padding:16px; display:grid; gap:16px; grid-template-columns:1fr 330px; }
+  header { grid-column:1/-1; }
+  h1 { margin:0; font-size:24px; } h1 span { color:var(--muted); font-weight:400; font-size:17px; }
+  #status { color:var(--muted); margin-top:4px; } #status::before { content:"● "; color:var(--amber); }
+  #status.run::before { color:var(--green); }
+  .card { background:var(--card); border-radius:14px; padding:14px; }
+  canvas { width:100%; display:block; touch-action:manipulation; }
+  .legend { display:flex; flex-wrap:wrap; gap:6px 14px; color:var(--muted); font-size:13px; margin-top:10px; }
+  .legend i { display:inline-block; width:12px; height:12px; border-radius:3px; margin-right:5px; vertical-align:-1px; }
+  h3 { margin:14px 0 8px; font-size:12px; color:var(--muted); font-weight:500; letter-spacing:.5px; }
+  h3:first-child { margin-top:0; }
+  button { border:0; border-radius:8px; padding:9px; color:#fff; background:#3e4860; font:inherit; cursor:pointer; }
+  button:hover { filter:brightness(1.15); }
+  .row3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+  .full { width:100%; margin-top:8px; background:var(--violet); }
+  .param { display:flex; align-items:center; gap:6px; margin:6px 0; }
+  .param span { flex:1; } .param button { width:38px; }
+  .bar { height:10px; background:var(--road); border-radius:5px; overflow:hidden; margin:6px 0 10px; }
+  .bar div { height:100%; width:0; background:var(--green); transition:width .2s; }
+  .stat { display:flex; justify-content:space-between; padding:3px 0; color:var(--muted); }
+  .stat b { color:var(--text); font-weight:500; }
+  a { color:var(--cyan); }
+  @media (max-width:800px) { .wrap { grid-template-columns:1fr; padding:12px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Smart Parking Simulator <span>Ақылды автотұрақ</span></h1>
+    <div id="status">Бастау батырмасын басыңыз. Бос орынды басса - брондалады.</div>
+  </header>
+
+  <div class="card">
+    <canvas id="map"></canvas>
+    <div class="legend">
+      <span><i style="background:#22784a"></i>бос</span><span><i style="background:#963c46"></i>бос емес</span>
+      <span><i style="background:var(--amber)"></i>бронь</span><span><i style="background:var(--blue)"></i>М - мүгедек</span>
+      <span><i style="background:var(--cyan)"></i>Э - электр</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>БАСҚАРУ</h3>
+    <div class="row3">
+      <button id="start" style="background:var(--green)">Бастау</button>
+      <button id="pause" style="background:var(--amber)">Кідірту</button>
+      <button id="restart">Қайта</button>
+    </div>
+    <button id="strategy" class="full"></button>
+    <h3>ПАРАМЕТРЛЕР</h3>
+    <div class="param"><span>Көліктер: <b id="cars"></b></span><button data-p="cars" data-d="-1">-</button><button data-p="cars" data-d="1">+</button></div>
+    <div class="param"><span>Келу аралығы: <b id="interval"></b> с</span><button data-p="interval" data-d="-1">-</button><button data-p="interval" data-d="1">+</button></div>
+    <div class="param"><span>Жылдамдық: x<b id="speed"></b></span><button data-p="speed" data-d="-1">-</button><button data-p="speed" data-d="1">+</button></div>
+    <h3>КӨРСЕТКІШТЕР</h3>
+    <div class="stat">Толу <b id="occ"></b></div>
+    <div class="bar"><div id="bar"></div></div>
+    <div id="stats"></div>
+    <p style="color:var(--muted);font-size:13px">Бұл - C++ бағдарламасының браузер нұсқасы (телефонға арналған).
+      <a href="https://github.com/AGERUSHA/smart-parking">Код</a> · <a href="report">Есеп</a></p>
+  </div>
+</div>
+
+<script>
+// Параметрлер (C++ нұсқасындағы Config сияқты)
+const cfg = { rows: 4, cols: 10, cars: 50, interval: 1.5, stayMin: 30, stayMax: 90,
+              reserved: 3, reserveTime: 20, seed: 42, strategy: "nearest" };
+const SPEED = 3, STEP = 0.05, ZONES = 3;
+let sim, running = false, speed = 2, acc = 0;
+
+function random(seed) { // қарапайым кездейсоқ сандар генераторы
+  return () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
+}
+
+// --- Тұрақ ---
+function makeLot() {
+  const spots = [];
+  for (let r = 0; r < cfg.rows; r++)
+    for (let c = 0; c < cfg.cols; c++) {
+      let kind = "normal";
+      if (r === 0 && c < 2) kind = "disabled";
+      else if (r === cfg.rows - 1 && c >= cfg.cols - 2) kind = "electric";
+      spots.push({ id: spots.length, row: r, col: c, zone: Math.floor(c * ZONES / cfg.cols), kind, state: "free", until: 0 });
+    }
+  return spots;
+}
+const distance = s => 2 * s.row + s.col + 2;
+const routeTo = s => [{ x: 0, y: 2 * s.row }, { x: s.col + 1, y: 2 * s.row }, { x: s.col + 1, y: 2 * s.row + 1 }];
+const routeFrom = s => [{ x: s.col + 1, y: 2 * s.row }, { x: 0, y: 2 * s.row }, { x: 0, y: 0 }];
+
+// --- Стратегиялар ---
+function nearest(list) {
+  let best = null;
+  for (const s of list) { sim.checked++; if (s.state === "free" && (!best || distance(s) < distance(best))) best = s; }
+  return best;
+}
+function choose(car) {
+  const spots = sim.spots;
+  if (car.kind !== "normal") {
+    const special = nearest(spots.filter(s => s.kind === car.kind));
+    if (special) return special;
+  }
+  const normal = spots.filter(s => s.kind === "normal");
+  if (cfg.strategy === "nearest") return nearest(normal);
+
+  // Теңестіру: ең аз толған аймақ, сол аймақтағы ең жақын орын
+  let zone = -1, load = 0;
+  for (let z = 0; z < ZONES; z++) {
+    const inZone = spots.filter(s => s.zone === z);
+    sim.checked += inZone.length;
+    const l = inZone.filter(s => s.state !== "free").length / inZone.length;
+    const hasFree = inZone.some(s => s.kind === "normal" && s.state === "free");
+    if (hasFree && (zone === -1 || l < load)) { zone = z; load = l; }
+  }
+  return zone === -1 ? null : nearest(normal.filter(s => s.zone === zone));
+}
+
+// --- Симуляция ---
+function reset() {
+  const rnd = random(cfg.seed);
+  sim = { time: 0, spots: makeLot(), cars: [], queue: [], next: 0, gone: 0,
+          searches: 0, checked: 0, dist: 0, maxQueue: 0, freed: 0 };
+  let t = 0;
+  for (let i = 0; i < cfg.cars; i++) {
+    t += cfg.interval * (0.5 + rnd());
+    const r = rnd();
+    const kind = r < 0.1 ? "disabled" : r < 0.2 ? "electric" : "normal";
+    sim.cars.push({ id: i, kind, arrive: t, stay: cfg.stayMin + rnd() * (cfg.stayMax - cfg.stayMin),
+                    state: "waiting", pos: { x: 0, y: 0 }, route: [], spot: null });
+  }
+  for (let made = 0; made < cfg.reserved;) {
+    const s = sim.spots[Math.floor(rnd() * sim.spots.length)];
+    if (s.kind === "normal" && s.state === "free") { s.state = "reserved"; s.until = cfg.reserveTime; made++; }
+  }
+  running = false; acc = 0;
+}
+
+function move(car, d) { // маршрут бойымен жылжу, соңына жетсе true
+  while (d > 0 && car.route.length) {
+    const t = car.route[0], dx = t.x - car.pos.x, dy = t.y - car.pos.y, len = Math.hypot(dx, dy);
+    if (len <= d) { car.pos = { ...t }; d -= len; car.route.shift(); }
+    else { car.pos.x += dx / len * d; car.pos.y += dy / len * d; d = 0; }
+  }
+  return car.route.length === 0;
+}
+
+function step(dt) {
+  sim.time += dt;
+  for (const s of sim.spots)
+    if (s.state === "reserved" && sim.time >= s.until) { s.state = "free"; sim.freed++; }
+  while (sim.next < sim.cars.length && sim.cars[sim.next].arrive <= sim.time) sim.queue.push(sim.cars[sim.next++]);
+
+  while (sim.queue.length) {
+    const car = sim.queue[0], s = choose(car);
+    if (!s) break;
+    s.state = "occupied"; car.spot = s; car.state = "driving";
+    car.pos = { x: 0, y: 0 }; car.route = routeTo(s);
+    sim.searches++; sim.dist += distance(s); sim.queue.shift();
+  }
+  sim.maxQueue = Math.max(sim.maxQueue, sim.queue.length);
+
+  for (const car of sim.cars) {
+    if (car.state === "driving" && move(car, SPEED * dt)) { car.state = "parked"; car.parkedAt = sim.time; }
+    else if (car.state === "parked" && sim.time >= car.parkedAt + car.stay) {
+      car.spot.state = "free"; car.state = "leaving"; car.route = routeFrom(car.spot);
+    } else if (car.state === "leaving" && move(car, SPEED * dt)) { car.state = "gone"; sim.gone++; }
+  }
+}
+
+// --- Сурет салу ---
+const canvas = document.getElementById("map"), ctx = canvas.getContext("2d");
+const COLORS = ["#ececf0", "#f08c3c", "#f0c846", "#aab0be", "#e66e96"];
+const carColor = c => c.kind === "disabled" ? "#4682f0" : c.kind === "electric" ? "#28cdc8" : COLORS[c.id % 5];
+
+function rect(x, y, w, h, r, fill, stroke, lw = 1) {
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+}
+
+function draw() {
+  const W = canvas.clientWidth, cell = W / (cfg.cols + 1), H = cell * (2 * cfg.rows + 0.6), top = cell * 0.6;
+  canvas.height = H * devicePixelRatio; canvas.width = W * devicePixelRatio; canvas.style.height = H + "px";
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+
+  rect(0, top, cell, 2 * cfg.rows * cell, 6, "#303440");
+  for (let r = 0; r < cfg.rows; r++) {
+    rect(0, top + 2 * r * cell, W, cell, 6, "#303440");
+    for (let x = cell + 8; x < W - 16; x += cell * 0.7) rect(x, top + 2 * r * cell + cell / 2 - 1, cell * 0.3, 2, 1, "#787c88");
+  }
+  ctx.font = `${Math.max(10, cell * 0.26)}px system-ui`; ctx.fillStyle = "#2eaa64";
+  ctx.fillText("КІРУ / ШЫҒУ", 4, top - cell * 0.18);
+
+  for (const s of sim.spots) {
+    const x = (s.col + 1) * cell + 3, y = top + (2 * s.row + 1) * cell + 3, w = cell - 6;
+    let fill = "#224a36", border = "#46785a";
+    if (s.state === "occupied") { fill = "#4e242c"; border = "#823c46"; }
+    if (s.state === "reserved") { fill = "#604a1a"; border = "#e2a834"; }
+    if (s.kind === "disabled") border = "#4682f0";
+    if (s.kind === "electric") border = "#28cdc8";
+    rect(x, y, w, w, 6, fill, border, s.kind === "normal" ? 1 : 2);
+    ctx.fillStyle = border;
+    if (s.kind !== "normal") ctx.fillText(s.kind === "disabled" ? "М" : "Э", x + 3, y + cell * 0.26);
+    if (s.state === "reserved") { ctx.fillStyle = "#e2a834"; ctx.fillText(Math.ceil(s.until - sim.time), x + w * 0.35, y + w * 0.6); }
+  }
+
+  const size = cell * 0.56;
+  for (const c of sim.cars) {
+    if (!["driving", "parked", "leaving"].includes(c.state)) continue;
+    const cx = (c.pos.x + 0.5) * cell, cy = top + (c.pos.y + 0.5) * cell;
+    rect(cx - size / 2, cy - size / 2 + 2, size, size, 6, "rgba(0,0,0,.35)");
+    rect(cx - size / 2, cy - size / 2, size, size, 6, carColor(c));
+    rect(cx - size * 0.3, cy - size * 0.22, size * 0.6, size * 0.42, 3, "rgba(25,30,42,.85)");
+  }
+  showStats();
+}
+
+const $ = id => document.getElementById(id);
+function setStatus(text) { $("status").textContent = text; $("status").className = running ? "run" : ""; }
+
+function showStats() {
+  const free = sim.spots.filter(s => s.state === "free").length, n = sim.spots.length, occ = 100 * (n - free) / n;
+  $("occ").textContent = occ.toFixed(0) + "%";
+  $("bar").style.width = occ + "%";
+  $("bar").style.background = occ < 70 ? "var(--green)" : occ < 95 ? "var(--amber)" : "var(--red)";
+  const rows = [["Уақыт", sim.time.toFixed(1) + " с"], ["Келді", sim.next + " / " + cfg.cars],
+    ["Бос орын", free + " / " + n], ["Кезек", sim.queue.length + "  (макс " + sim.maxQueue + ")"],
+    ["Қаралған орын", sim.searches ? (sim.checked / sim.searches).toFixed(1) : "0"],
+    ["Орташа жол", sim.searches ? (sim.dist / sim.searches).toFixed(1) : "0"], ["Брондан босады", sim.freed]];
+  $("stats").innerHTML = rows.map(([k, v]) => `<div class="stat">${k} <b>${v}</b></div>`).join("");
+  $("cars").textContent = cfg.cars; $("interval").textContent = cfg.interval.toFixed(1); $("speed").textContent = speed;
+  $("strategy").textContent = "Стратегия: " + (cfg.strategy === "nearest" ? "ең жақын орын" : "теңестіру");
+}
+
+// --- Батырмалар ---
+$("start").onclick = () => { running = sim.gone < cfg.cars; setStatus("Жүріп жатыр"); };
+$("pause").onclick = () => { running = false; setStatus("Кідіртілді"); };
+$("restart").onclick = () => { reset(); setStatus("Қайта басталды"); };
+$("strategy").onclick = () => { cfg.strategy = cfg.strategy === "nearest" ? "balanced" : "nearest"; reset(); setStatus("Стратегия өзгерді"); };
+document.querySelectorAll("[data-p]").forEach(b => b.onclick = () => {
+  const d = +b.dataset.d;
+  if (b.dataset.p === "speed") { speed = Math.min(16, Math.max(1, d > 0 ? speed * 2 : speed / 2)); return; }
+  if (b.dataset.p === "cars") { const o = [20, 50, 100]; cfg.cars = o[Math.min(2, Math.max(0, o.indexOf(cfg.cars) + d))]; }
+  else cfg.interval = Math.min(5, Math.max(0.5, cfg.interval + d * 0.5));
+  reset(); setStatus("Параметр өзгерді");
+});
+canvas.onclick = e => { // бос орынды басу - брондау
+  const cell = canvas.clientWidth / (cfg.cols + 1), b = canvas.getBoundingClientRect();
+  const cx = Math.floor((e.clientX - b.left) / cell), cy = Math.floor((e.clientY - b.top - cell * 0.6) / cell);
+  const s = sim.spots.find(s => s.col === cx - 1 && 2 * s.row + 1 === cy);
+  if (s && s.state === "free") { s.state = "reserved"; s.until = sim.time + cfg.reserveTime; setStatus(`Орын ${s.id} брондалды`); }
+};
+
+let last = performance.now();
+function loop(now) {
+  if (running) {
+    acc += Math.min((now - last) / 1000, 0.1) * speed;
+    while (acc >= STEP) { step(STEP); acc -= STEP; }
+    if (sim.gone === cfg.cars) { running = false; setStatus("Симуляция аяқталды"); }
+  }
+  last = now; draw(); requestAnimationFrame(loop);
+}
+reset(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
